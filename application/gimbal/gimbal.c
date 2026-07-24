@@ -16,6 +16,15 @@
 #define PITCH_GRAVITY_FF_FUCTION_B          0.0f                     // 重力补偿函数的A * cosf(beta) + B * sinf(beta)
 
 
+#define YAW_CURRENT_FF_K          1.0f
+#define YAW_CURRENT_FF_MAX        1500.0f
+#define YAW_CURRENT_FF_LPF_TAU    0.03f
+
+static float yaw_target_speed_lpf = 0.0f;
+static float yaw_ff_dt = 0.0f;
+static uint8_t yaw_ff_valid = 0;
+
+
 /*云台外设定义*/
 static attitude_t *gimbal_IMU_data;               // 云台IMU数据
 static DJIMotorInstance *yaw_motor;
@@ -110,7 +119,7 @@ static void GimbalStabilityCalc(const attitude_t *gimbal_imu_data, const attitud
 }
 
 /**
- * @brief yaw轴速度前馈
+ * @brief Yaw轴速度前馈
  *
  * @param target_yaw 遥控器的控制角度
  * 
@@ -153,13 +162,41 @@ static float YawSpeedFeedforwardUpdate(float target_yaw)
 
 /**
  * @brief Yaw轴加速度前馈
- *
- * @param target_yaw 遥控器的控制角度
- * 
  */
-static float YawCurrentFeedforwardUpdate()
+static float YawCurrentFeedforwardUpdate(void)
 {
+    static float last_target_speed = 0.0f;
+    static float target_acc_lpf = 0.0f;
+    static uint8_t initialized = 0;
 
+    if (!initialized)
+    {
+        initialized = 1;
+        last_target_speed = yaw_target_speed_lpf;
+        target_acc_lpf = 0.0f;
+        yaw_current_feedforward = 0.0f;
+        return yaw_current_feedforward;
+    }
+
+    if (!yaw_ff_valid || yaw_ff_dt <= 0.0001f || yaw_ff_dt > 0.02f)
+    {
+        last_target_speed = yaw_target_speed_lpf;
+        target_acc_lpf = 0.0f;
+        yaw_current_feedforward = 0.0f;
+        return yaw_current_feedforward;
+    }
+
+    float target_acc = (yaw_target_speed_lpf - last_target_speed) / yaw_ff_dt;
+    float alpha = yaw_ff_dt / (YAW_CURRENT_FF_LPF_TAU + yaw_ff_dt);
+
+    target_acc_lpf += alpha * (target_acc - target_acc_lpf);
+
+    yaw_current_feedforward = YAW_CURRENT_FF_K * target_acc_lpf;
+    LIMIT_MIN_MAX(yaw_current_feedforward, -YAW_CURRENT_FF_MAX, YAW_CURRENT_FF_MAX);
+
+    last_target_speed = yaw_target_speed_lpf;
+
+    return yaw_current_feedforward;
 }
 
 
