@@ -17,7 +17,7 @@
 
 
 /*云台外设定义*/
-static attitude_t *gimbal_IMU_data; // 云台IMU数据
+static attitude_t *gimbal_IMU_data;               // 云台IMU数据
 static DJIMotorInstance *yaw_motor;
 static DMMotorInstance *pitch_motor;
 /*消息订阅与发布定义*/
@@ -32,6 +32,8 @@ static attitude_t chassis_imu_recv;         // 接收的底盘IMU数据
 static GimbalComp_t gimbal_comp;
 // Yaw轴速度前馈
 static float yaw_speed_feedforward  = 0.0f;
+// Yaw轴加速度前馈
+static float yaw_current_feedforward = 0.0f;
 // Pitch轴重力补偿前馈
 static float pitch_gravity_feedforward = 0.0f;
 
@@ -116,6 +118,7 @@ static void GimbalStabilityCalc(const attitude_t *gimbal_imu_data, const attitud
 static float YawSpeedFeedforwardUpdate(float target_yaw)
 {
     static float last_target_yaw = 0.0f;
+    static float target_yaw_speed = 0.0f;
     static uint32_t last_tick = 0;
     static uint8_t initialized = 0;
 
@@ -125,23 +128,40 @@ static float YawSpeedFeedforwardUpdate(float target_yaw)
     {
         initialized = 1;
         last_target_yaw = target_yaw;
+        target_yaw_speed = 0.0f;
         yaw_speed_feedforward = 0.0f;
         return yaw_speed_feedforward;
     }
 
     if (dt > 0.0001f && dt < 0.02f)
     {
-        yaw_speed_feedforward = (target_yaw - last_target_yaw) / dt;
+        target_yaw_speed = (target_yaw - last_target_yaw) / dt;
+
+        yaw_speed_feedforward = YAW_SPEED_FF_K * target_yaw_speed;
         LIMIT_MIN_MAX(yaw_speed_feedforward, -300.0f, 300.0f);
     }
     else
     {
+        target_yaw_speed = 0.0f;
         yaw_speed_feedforward = 0.0f;
     }
 
     last_target_yaw = target_yaw;
-    return YAW_SPEED_FF_K * yaw_speed_feedforward;
+
+    return yaw_speed_feedforward;
 }
+
+/**
+ * @brief Yaw轴加速度前馈
+ *
+ * @param target_yaw 遥控器的控制角度
+ * 
+ */
+static float YawCurrentFeedforwardUpdate()
+{
+
+}
+
 
 /**
  * @brief Pitch轴重力补偿
@@ -189,6 +209,7 @@ void GimbalInit()
             // 还需要增加角速度额外反馈指针,注意方向,ins_task.md中有c板的bodyframe坐标系说明
             .other_speed_feedback_ptr = &gimbal_IMU_data->Gyro[2],
             .speed_feedforward_ptr = &yaw_speed_feedforward,
+            .current_feedforward_ptr = &yaw_current_feedforward,
         },
         .controller_setting_init_config = {
             .angle_feedback_source = OTHER_FEED,
@@ -196,7 +217,7 @@ void GimbalInit()
             .outer_loop_type = ANGLE_LOOP,
             .close_loop_type = ANGLE_LOOP | SPEED_LOOP,
             .motor_reverse_flag = MOTOR_DIRECTION_NORMAL,
-            .feedforward_flag = SPEED_FEEDFORWARD,
+            .feedforward_flag = CURRENT_AND_SPEED_FEEDFORWARD,
         },
         .motor_type = GM6020
     };
