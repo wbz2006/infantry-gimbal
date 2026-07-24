@@ -153,6 +153,7 @@ modules/daemon/daemon.c \
 modules/alarm/buzzer.c \
 modules/serial_print/serial_print.c \
 application/gimbal/gimbal.c \
+application/gimbal/gimbal_algorithm.c \
 application/chassis/chassis.c \
 application/shoot/shoot.c \
 application/cmd/robot_cmd.c \

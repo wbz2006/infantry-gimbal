@@ -7,23 +7,8 @@
 #include "general_def.h"
 #include "bmi088.h"
 #include "can_comm.h"
+#include "gimbal_algorithm.h"
 #include "serial_print.h"
-
-
-#define YAW_SPEED_FF_K                      1.2f                     // Yaw轴速度前馈系数
-#define PITCH_GRAVITY_FF_K                  1.0f                     // Pitch轴重力补偿前馈系数
-#define PITCH_GRAVITY_FF_FUCTION_A          0.0f                     // 重力补偿函数的A * cosf(beta) + B * sinf(beta)
-#define PITCH_GRAVITY_FF_FUCTION_B          0.0f                     // 重力补偿函数的A * cosf(beta) + B * sinf(beta)
-
-
-#define YAW_CURRENT_FF_K          1.0f
-#define YAW_CURRENT_FF_MAX        1500.0f
-#define YAW_CURRENT_FF_LPF_TAU    0.03f
-
-static float yaw_target_speed_lpf = 0.0f;
-static float yaw_ff_dt = 0.0f;
-static uint8_t yaw_ff_valid = 0;
-
 
 /*云台外设定义*/
 static attitude_t *gimbal_IMU_data;               // 云台IMU数据
@@ -38,182 +23,12 @@ static Gimbal_Ctrl_Cmd_s gimbal_cmd_recv;         // 来自cmd的控制信息
 static Subscriber_t *chassis_imu_sub;       // 底盘IMU消息订阅者
 static attitude_t chassis_imu_recv;         // 接收的底盘IMU数据
 /*云台控制算法定义*/
-static GimbalComp_t gimbal_comp;
-// Yaw轴速度前馈
-static float yaw_speed_feedforward  = 0.0f;
-// Yaw轴加速度前馈
-static float yaw_current_feedforward = 0.0f;
-// Pitch轴重力补偿前馈
-static float pitch_gravity_feedforward = 0.0f;
+// Yaw轴速度前馈 + Yaw轴加速度前馈 + Pitch轴重力补偿前馈
+Gimbal_Feedforward_s gimbal_ff;
 
 
 
 // static BMI088Instance *bmi088; // 云台IMU
-
-#define YAW_SINE_AMPLITUDE_DEG    60.0f   // 正弦幅值，单位：度
-#define YAW_SINE_FREQ_HZ          0.4f    // 频率，0.2Hz = 5秒一个周期
-#define YAW_SINE_SPEED_FF_K       1.0f    // 速度前馈系数
-
-static float YawSineRefUpdate(float current_yaw_total)
-{
-    static uint8_t initialized = 0;
-    static uint32_t last_tick = 0;
-    static float yaw_center = 0.0f;
-    static float phase = 0.0f;
-
-    float dt = DWT_GetDeltaT(&last_tick);
-
-    if (!initialized)
-    {
-        initialized = 1;
-        yaw_center = current_yaw_total;   // 以上电当前角度为正弦中心，避免突然跳变
-        phase = 0.0f;
-        yaw_speed_feedforward = 0.0f;
-        return yaw_center;
-    }
-
-    if (dt <= 0.0001f || dt > 0.02f)
-    {
-        yaw_speed_feedforward = 0.0f;
-        return yaw_center + YAW_SINE_AMPLITUDE_DEG * sinf(phase);
-    }
-
-    float omega = 2.0f * PI * YAW_SINE_FREQ_HZ;
-
-    phase += omega * dt;
-
-    if (phase > 2.0f * PI)
-    {
-        phase -= 2.0f * PI;
-    }
-
-    float yaw_ref = yaw_center + YAW_SINE_AMPLITUDE_DEG * sinf(phase);
-
-    yaw_speed_feedforward =
-        YAW_SINE_SPEED_FF_K * YAW_SINE_AMPLITUDE_DEG * omega * cosf(phase);
-
-    LIMIT_MIN_MAX(yaw_speed_feedforward, -300.0f, 300.0f);
-
-    return yaw_ref;
-}
-
-
-static void GimbalStabilityCalc(const attitude_t *gimbal_imu_data, const attitude_t *chassis_imu_data, GimbalComp_t *gimbal_comp)
-{
-    
-    float fb_yaw = gimbal_imu_data->Gyro[2];   // Z轴 → yaw角速度
-
-    float fb_pitch = gimbal_imu_data->Gyro[1];   // Y轴 → pitch角速度
-
-
-    float yaw_rad = chassis_imu_data->Yaw * PI / 180.0f;
-
-    float ff_yaw = -chassis_imu_data->Gyro[2];
-
-    float ff_pitch = sinf(yaw_rad) * chassis_imu_data->Gyro[0] - cosf(yaw_rad) * chassis_imu_data->Gyro[1];
-
-    gimbal_comp->yaw_speed = fb_yaw;// + ff_yaw;
-
-    gimbal_comp->pitch_speed = fb_pitch;// + ff_pitch;
-
-}
-
-/**
- * @brief Yaw轴速度前馈
- *
- * @param target_yaw 遥控器的控制角度
- * 
- */
-static float YawSpeedFeedforwardUpdate(float target_yaw)
-{
-    static float last_target_yaw = 0.0f;
-    static float target_yaw_speed = 0.0f;
-    static uint32_t last_tick = 0;
-    static uint8_t initialized = 0;
-
-    float dt = DWT_GetDeltaT(&last_tick);
-
-    if (!initialized)
-    {
-        initialized = 1;
-        last_target_yaw = target_yaw;
-        target_yaw_speed = 0.0f;
-        yaw_speed_feedforward = 0.0f;
-        return yaw_speed_feedforward;
-    }
-
-    if (dt > 0.0001f && dt < 0.02f)
-    {
-        target_yaw_speed = (target_yaw - last_target_yaw) / dt;
-
-        yaw_speed_feedforward = YAW_SPEED_FF_K * target_yaw_speed;
-        LIMIT_MIN_MAX(yaw_speed_feedforward, -300.0f, 300.0f);
-    }
-    else
-    {
-        target_yaw_speed = 0.0f;
-        yaw_speed_feedforward = 0.0f;
-    }
-
-    last_target_yaw = target_yaw;
-
-    return yaw_speed_feedforward;
-}
-
-/**
- * @brief Yaw轴加速度前馈
- */
-static float YawCurrentFeedforwardUpdate(void)
-{
-    static float last_target_speed = 0.0f;
-    static float target_acc_lpf = 0.0f;
-    static uint8_t initialized = 0;
-
-    if (!initialized)
-    {
-        initialized = 1;
-        last_target_speed = yaw_target_speed_lpf;
-        target_acc_lpf = 0.0f;
-        yaw_current_feedforward = 0.0f;
-        return yaw_current_feedforward;
-    }
-
-    if (!yaw_ff_valid || yaw_ff_dt <= 0.0001f || yaw_ff_dt > 0.02f)
-    {
-        last_target_speed = yaw_target_speed_lpf;
-        target_acc_lpf = 0.0f;
-        yaw_current_feedforward = 0.0f;
-        return yaw_current_feedforward;
-    }
-
-    float target_acc = (yaw_target_speed_lpf - last_target_speed) / yaw_ff_dt;
-    float alpha = yaw_ff_dt / (YAW_CURRENT_FF_LPF_TAU + yaw_ff_dt);
-
-    target_acc_lpf += alpha * (target_acc - target_acc_lpf);
-
-    yaw_current_feedforward = YAW_CURRENT_FF_K * target_acc_lpf;
-    LIMIT_MIN_MAX(yaw_current_feedforward, -YAW_CURRENT_FF_MAX, YAW_CURRENT_FF_MAX);
-
-    last_target_speed = yaw_target_speed_lpf;
-
-    return yaw_current_feedforward;
-}
-
-
-/**
- * @brief Pitch轴重力补偿
- *
- * @param  actual_pitch 实际pitch轴角度
- * 
- */
-static float PitchGravityFeedforwardUpdate(const float actual_pitch)
-{
-    float beta = actual_pitch * PI / 180.0f;
-    
-    pitch_gravity_feedforward = PITCH_GRAVITY_FF_FUCTION_A * cosf(beta) + PITCH_GRAVITY_FF_FUCTION_B * sinf(beta);
-
-    return  0.38; // PITCH_GRAVITY_FF_K * pitch_gravity_feedforward;
-}
 
 void GimbalInit()
 {   
@@ -245,8 +60,8 @@ void GimbalInit()
             .other_angle_feedback_ptr = &gimbal_IMU_data->YawTotalAngle,
             // 还需要增加角速度额外反馈指针,注意方向,ins_task.md中有c板的bodyframe坐标系说明
             .other_speed_feedback_ptr = &gimbal_IMU_data->Gyro[2],
-            .speed_feedforward_ptr = &yaw_speed_feedforward,
-            .current_feedforward_ptr = &yaw_current_feedforward,
+            .speed_feedforward_ptr = &gimbal_ff.yaw_speed_ff,
+            .current_feedforward_ptr = &gimbal_ff.yaw_current_ff,
         },
         .controller_setting_init_config = {
             .angle_feedback_source = OTHER_FEED,
@@ -285,7 +100,7 @@ void GimbalInit()
             .other_angle_feedback_ptr = &gimbal_IMU_data->Pitch,
             // 还需要增加角速度额外反馈指针,注意方向,ins_task.md中有c板的bodyframe坐标系说明
             .other_speed_feedback_ptr = (&gimbal_IMU_data->Gyro[0]),
-            .current_feedforward_ptr = &pitch_gravity_feedforward,
+            .current_feedforward_ptr = &gimbal_ff.pitch_current_ff,
         },
         .controller_setting_init_config = {
             .angle_feedback_source = OTHER_FEED,
@@ -350,19 +165,19 @@ void GimbalTask()
 
         // YawSpeedFeedforwardUpdate(gimbal_cmd_recv.yaw);
         PitchGravityFeedforwardUpdate(gimbal_IMU_data->Pitch);
-        float yaw_ref = YawSineRefUpdate(gimbal_IMU_data->YawTotalAngle);
 
+        YawFeedforwardUpdate(gimbal_cmd_recv.yaw);
 
         DJIMotorChangeFeed(yaw_motor, ANGLE_LOOP, OTHER_FEED);
         DJIMotorChangeFeed(yaw_motor, SPEED_LOOP, OTHER_FEED);
         DMMotorChangeFeed(pitch_motor, ANGLE_LOOP, OTHER_FEED);
         DMMotorChangeFeed(pitch_motor, SPEED_LOOP, OTHER_FEED);
 
-        DJIMotorSetRef(yaw_motor, yaw_ref); // yaw和pitch会在robot_cmd中处理好多圈和单圈
+        DJIMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw); // yaw和pitch会在robot_cmd中处理好多圈和单圈
         DMMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
         
-        float error = yaw_ref - gimbal_IMU_data->YawTotalAngle;
-        SerialPrintf("%.1f,%.1f,%.1f,%.1f,%.1f\n",gimbal_IMU_data->Yaw,   yaw_ref, 
+        float error = gimbal_cmd_recv.yaw - gimbal_IMU_data->YawTotalAngle;
+        SerialPrintf("%.1f,%.1f,%.1f,%.1f,%.1f\n",gimbal_IMU_data->Yaw,  gimbal_cmd_recv.yaw, 
                                      gimbal_IMU_data->Pitch, gimbal_cmd_recv.pitch, error);
         break;
     default:
