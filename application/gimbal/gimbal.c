@@ -1,4 +1,4 @@
-﻿#include "gimbal.h"
+#include "gimbal.h"
 #include "robot_def.h"
 #include "dji_motor.h"
 #include "dmmotor.h"
@@ -40,7 +40,7 @@ static float pitch_gravity_feedforward = 0.0f;
 // static BMI088Instance *bmi088; // 云台IMU
 
 #define YAW_SINE_AMPLITUDE_DEG    60.0f   // 正弦幅值，单位：度
-#define YAW_SINE_FREQ_HZ          0.6f    // 频率，0.2Hz = 5秒一个周期
+#define YAW_SINE_FREQ_HZ          0.4f    // 频率，0.2Hz = 5秒一个周期
 #define YAW_SINE_SPEED_FF_K       1.0f    // 速度前馈系数
 
 static float YawSineRefUpdate(float current_yaw_total)
@@ -105,8 +105,6 @@ static void GimbalStabilityCalc(const attitude_t *gimbal_imu_data, const attitud
 
     gimbal_comp->pitch_speed = fb_pitch;// + ff_pitch;
 
-    //后续补充重力补偿力矩，阻力补偿力矩，加速度补偿力矩计算,主要是pitch电机的重力补偿,需要知道pitch电机的安装角度和配重质量
-    //该函数只实现对速控云台的自稳控制
 }
 
 /**
@@ -306,7 +304,7 @@ void GimbalTask()
         DMMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
         
         float error = yaw_ref - gimbal_IMU_data->YawTotalAngle;
-        SerialPrintf("%f,%f,%f,%f,%f\n",gimbal_IMU_data->Yaw,   yaw_ref, 
+        SerialPrintf("%.1f,%.1f,%.1f,%.1f,%.1f\n",gimbal_IMU_data->Yaw,   yaw_ref, 
                                      gimbal_IMU_data->Pitch, gimbal_cmd_recv.pitch, error);
         break;
     default:
