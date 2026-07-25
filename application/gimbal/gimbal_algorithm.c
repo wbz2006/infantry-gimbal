@@ -187,7 +187,7 @@ float PitchGravityFeedforwardUpdate(const float actual_pitch)
     
     gimbal_ff.pitch_current_ff = PITCH_GRAVITY_FF_FUCTION_A * cosf(beta) + PITCH_GRAVITY_FF_FUCTION_B * sinf(beta);
 
-    return  0.38; // PITCH_GRAVITY_FF_K * pitch_gravity_feedforward;
+    return  0.38; // pitch_gravity_feedforward;
 }
 
 

@@ -128,6 +128,15 @@ if (loop == ANGLE_LOOP)
         LOGERROR("[dm_motor] loop type error, check memory access and func param"); // 检查是否传入了正确的LOOP类型,或发生了指针越界
 }
 
+void DMMotorSetMITRef(DMMotorInstance *motor, float p, float v, float kp, float kd, float tau_ff)
+{
+    motor->mit_config.position_des = p;
+    motor->mit_config.velocity_des = v;
+    motor->mit_config.kp = kp;
+    motor->mit_config.kd = kd;
+    motor->mit_config.torque_des = tau_ff;
+}
+
 /**
  * @brief DM电机统一控制函数，由外部任务周期调用
  *        遍历所有DM电机实例，进行串级PID计算并发送CAN控制报文

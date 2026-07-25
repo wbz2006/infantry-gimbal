@@ -101,6 +101,8 @@ void DMMotorStop(DMMotorInstance *motor);
  */
 void DMMotorChangeFeed(DMMotorInstance *motor, Closeloop_Type_e loop, Feedback_Source_e type);
 
+void DMMotorSetMITRef(DMMotorInstance *motor, float p, float v, float kp, float kd, float tau_ff);
+
 /**
  * @brief 该函数被motor_task调用运行在rtos上,motor_task内通过osDelay()确定控制频率
  */
