@@ -58,7 +58,10 @@ __attribute__((noreturn)) void StartINSTASK(void const *argument)
 {
     static float ins_start;
     static float ins_dt;
-    INS_Init(); // 确保BMI088被正确初始化.
+    // 初始化和校准期间允许控制任务运行，持续反馈 IMU 尚未就绪。
+    osThreadSetPriority(osThreadGetId(), osPriorityNormal);
+    INS_Init();
+    osThreadSetPriority(osThreadGetId(), osPriorityAboveNormal);
     LOGINFO("[freeRTOS] INS Task Start");
     for (;;)
     {
@@ -104,7 +107,7 @@ __attribute__((noreturn)) void StartDAEMONTASK(void const *argument)
         daemon_dt = DWT_GetTimeline_ms() - daemon_start;
         if (daemon_dt > 10)
             LOGERROR("[freeRTOS] Daemon Task is being DELAY! dt = [%f]", &daemon_dt);
-        osDelay(10);
+        osDelay(DAEMON_TASK_PERIOD_MS);
     }
 }
 
