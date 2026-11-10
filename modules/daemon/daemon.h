@@ -138,15 +138,13 @@ void DaemonClearFaultFlags(DaemonInstance *instance, uint32_t fault_flags);
 uint32_t DaemonGetFaultFlags(DaemonInstance *instance);
 
 /**
- * @brief 将应用的分类故障写入 daemon，并更新设备反馈有效状态。
- * @param daemon 本应用使用的 daemon 实例。
+ * @brief 将应用的四类故障组合为一个 32 位快照，供停机仲裁或状态查询使用。
  * @param fault 本周期已采集的故障；未使用的分类字段保持为 0。
  * @return uint32_t 故障快照，0 表示无故障；从低到高依次为电机、通信、IMU、控制输入。
- * @note 电机、IMU 或所依赖的应用反馈链路故障会使设备反馈无效。
- *       命令链路和控制输入故障仍计入快照，但不改变设备反馈的有效性。
- *       本函数不采集设备状态、不喂狗、不清除命令，停机策略由所属应用执行。
+ * @note 直接读取 App_Fault_s，不依赖或修改 daemon 实例，也不修改传入的故障状态。
+ *       本函数不采集设备状态、不喂狗、不清除命令，反馈有效性和停机策略由所属应用判断。
  */
-uint32_t AppFaultUpdate(DaemonInstance *daemon, const App_Fault_s *fault);
+uint32_t AppFaultUpdate(const App_Fault_s *fault);
 
 /**
  * @brief 放入rtos中,会给每个daemon实例的temp_count按频率进行递减操作.

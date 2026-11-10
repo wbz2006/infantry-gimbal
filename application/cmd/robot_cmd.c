@@ -47,7 +47,6 @@ static Shoot_Upload_Data_s shoot_fetch_data; // 从发射获取的反馈信息
 
 static Robot_Status_e robot_state; // 机器人整体工作状态
 static App_Fault_s cmd_fault;
-static DaemonInstance *cmd_daemon;
 static DaemonInstance *chassis_feed_daemon, *gimbal_feed_daemon, *shoot_feed_daemon;
 
 BMI088Instance *bmi088_test; // 云台IMU
@@ -65,7 +64,6 @@ void RobotCMDInit()
         .reload_count = DAEMON_COUNT_FROM_MS(APP_COMMAND_TIMEOUT_MS),
         .require_first_reload = 1,
     };
-    cmd_daemon = DaemonRegister(&feedback_daemon_config);
     gimbal_feed_daemon = DaemonRegister(&feedback_daemon_config);
     shoot_feed_daemon = DaemonRegister(&feedback_daemon_config);
 
@@ -77,7 +75,7 @@ void RobotCMDInit()
 #ifdef GIMBAL_BOARD
     CANComm_Init_Config_s comm_conf = {
         .can_config = {
-            .can_handle = &hcan1,
+            .can_handle = &hcan2,
             .tx_id = 0x312,
             .rx_id = 0x311,
         },
@@ -250,12 +248,10 @@ static void MouseKeySet()
  */
 static void EmergencyHandler()
 {
-    uint32_t faults = AppFaultUpdate(cmd_daemon, &cmd_fault) |
-        AppFaultUpdate(gimbal_feed_daemon, &gimbal_fetch_data.fault) |
-        AppFaultUpdate(shoot_feed_daemon, &shoot_fetch_data.fault);
-    faults |= (uint32_t)chassis_fetch_data.fault.motor_offline_flags |
-        chassis_fetch_data.fault.comm_fault_flags | chassis_fetch_data.fault.imu_fault_flags |
-        chassis_fetch_data.fault.control_fault_flags;
+    uint32_t faults = AppFaultUpdate(&cmd_fault) |
+        AppFaultUpdate(&gimbal_fetch_data.fault) |
+        AppFaultUpdate(&shoot_fetch_data.fault) |
+        AppFaultUpdate(&chassis_fetch_data.fault);
 
     if (faults != 0 || rc_data[TEMP].rc.dial > 300)
         robot_state = ROBOT_STOP;
@@ -332,6 +328,5 @@ void RobotCMDTask()
 #endif // GIMBAL_BOARD
     PubPushMessage(shoot_cmd_pub, (void *)&shoot_cmd_send);
     PubPushMessage(gimbal_cmd_pub, (void *)&gimbal_cmd_send);
-    DaemonReload(cmd_daemon);
     VisionSend(&vision_send_data);
 }

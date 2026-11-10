@@ -135,9 +135,13 @@ void GimbalTask()
         gimbal_feedback_data.fault.motor_offline_flags |= MOTOR_2_OFFLINE;
     gimbal_feedback_data.fault.imu_fault_flags = INS_GetFaultFlags();
 
-    if (AppFaultUpdate(gimbal_cmd_daemon, &gimbal_feedback_data.fault) != 0)
+    if (AppFaultUpdate(&gimbal_feedback_data.fault) != 0)
         gimbal_cmd_recv.gimbal_mode = GIMBAL_ZERO_FORCE;
-    gimbal_feedback_data.feedback_valid = DaemonIsFeedbackValid(gimbal_cmd_daemon);
+    // 命令离线不等于设备反馈失效；反馈有效性只取决于电机、IMU 和所依赖的反馈链路。
+    gimbal_feedback_data.feedback_valid =
+        gimbal_feedback_data.fault.motor_offline_flags == MOTOR_OFFLINE_NONE &&
+        gimbal_feedback_data.fault.imu_fault_flags == APP_IMU_FAULT_NONE &&
+        (gimbal_feedback_data.fault.comm_fault_flags & APP_COMM_FAULT_FEEDBACK_OFFLINE) == 0;
 
     // @todo:现在已不再需要电机反馈,实际上可以始终使用IMU的姿态数据来作为云台的反馈,yaw电机的offset只是用来跟随底盘
     // 根据控制模式进行电机反馈切换和过渡,视觉模式在robot_cmd模块就已经设置好,gimbal只看yaw_ref和pitch_ref

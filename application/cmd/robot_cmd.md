@@ -53,6 +53,8 @@
 
 云台板沿用 CAN1（与 DM Pitch 共用），发 0x312、收 0x311；配套底盘使用 CAN3。命令为 24 字节，底盘反馈为 65 字节，包括完整 IMU、四字节 App_Fault_s 和底盘真实速度。只通过 CANCommReceive 复制在线反馈，底盘反馈超时复用 CANComm 的 daemon；本地云台、发射反馈分别以 50 ms 窗口监测，未收到首包时保持离线。
 
+CMD 不再注册给自身喂狗的 daemon；故障仲裁直接对各应用的 App_Fault_s 调用 AppFaultUpdate(&fault)，通信 daemon 只用于实际的命令和反馈链路超时检测。
+
 CMD 自身的 App_Fault_s 可通过 RobotCMDGetFault() 读取：comm_fault_flags 报告所依赖的应用反馈离线，control_fault_flags 报告 DBUS 遥控器离线；不直接使用的电机、IMU 和图传控制位保持 0。各执行应用的详细电机/IMU/命令故障仍保留在各自的 fault 中，不把不同应用的电机编号混在一起。
 
 CMD 或任一执行应用存在故障、或拨轮向下超过 300 时，锁存 ROBOT_STOP，持续向底盘、云台、发射发送停机命令。只有故障解除且右侧开关处于上位才恢复 ROBOT_READY；当前仍有故障时，上位不能解除急停。零力矩期间云台目标跟随反馈姿态，避免恢复时追赶停机期间累计的角度。首次启动也按此流程解锁。

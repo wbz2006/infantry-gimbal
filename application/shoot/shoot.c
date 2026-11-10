@@ -145,7 +145,7 @@ void ShootTask()
     if (loader == NULL || MotorIsOffline(loader->daemon, loader->motor_can_instance))
         shoot_feedback_data.fault.motor_offline_flags |= MOTOR_3_OFFLINE;
 
-    if (AppFaultUpdate(shoot_cmd_daemon, &shoot_feedback_data.fault) != 0)
+    if (AppFaultUpdate(&shoot_feedback_data.fault) != 0)
     {
         if (friction_l != NULL) DJIMotorStop(friction_l);
         if (friction_r != NULL) DJIMotorStop(friction_r);
