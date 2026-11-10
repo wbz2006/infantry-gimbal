@@ -8,31 +8,26 @@
 
 #define DM_MOTOR_CNT 4
 
-#define DM_P_MIN  (-12.5f)              // 依据电机手册参数限值
+#define DM_P_MIN  (-12.5f)
 #define DM_P_MAX  12.5f
-#define DM_V_MIN  (-20.94f)
-#define DM_V_MAX  20.94f
-#define DM_T_MIN  (-12.5f)
-#define DM_T_MAX   12.5f
-#define DM_KP_MIN 0.0f
-#define DM_KP_MAX 500.0f
-#define DM_KD_MIN 0.0f
-#define DM_KD_MAX 5.0f
+#define DM_V_MIN  (-45.0f)
+#define DM_V_MAX  45.0f
+#define DM_T_MIN  (-18.0f)
+#define DM_T_MAX   18.0f
 
 typedef struct 
 {
     uint8_t id;
     uint8_t state;
-    float velocity;                     // 电机速度(rad/s)
+    float velocity;
     float last_position;
     float position;
-    float torque;                       // 电机力矩(N.m)
+    float torque;
     float T_Mos;
     float T_Rotor;
     int32_t total_round;
 }DM_Motor_Measure_s;
 
-// 达妙电机CAN发送结构体
 typedef struct
 {
     uint16_t position_des;
@@ -41,17 +36,6 @@ typedef struct
     uint16_t Kp;
     uint16_t Kd;
 }DMMotor_Send_s;
-
-// 达妙电机MIT参数结构体
-typedef struct
-{
-    float position_des;   // rad
-    float velocity_des;   // rad/s
-    float torque_des;     // N*m
-    float kp;
-    float kd;
-} DMMotor_MIT_Config_s;
-
 typedef struct 
 {
     DM_Motor_Measure_s measure;
@@ -64,10 +48,6 @@ typedef struct
     float *speed_feedforward_ptr;
     float *current_feedforward_ptr;
     float pid_ref;
-
-    DMMotor_MIT_Config_s mit_config;
-    DMMotor_Send_s motor_send_mailbox;
-
     Motor_Working_Type_e stop_flag;
     CANInstance *motor_can_instace;
     DaemonInstance* motor_daemon;
@@ -91,36 +71,6 @@ void DMMotorOuterLoop(DMMotorInstance *motor,Closeloop_Type_e closeloop_type);
 void DMMotorEnable(DMMotorInstance *motor);
 
 void DMMotorStop(DMMotorInstance *motor);
-
-/**
- * @brief 切换反馈的目标来源,如将角速度和角度的来源换为IMU(小陀螺模式常用)
- *
- * @param motor 要切换反馈数据来源的电机
- * @param loop  要切换反馈数据来源的控制闭环
- * @param type  目标反馈模式
- */
-void DMMotorChangeFeed(DMMotorInstance *motor, Closeloop_Type_e loop, Feedback_Source_e type);
-
-void DMMotorSetMITRef(DMMotorInstance *motor, float p, float v, float kp, float kd, float tau_ff);
-
-/**
- * @brief 该函数被motor_task调用运行在rtos上,motor_task内通过osDelay()确定控制频率
- */
-void DMMotorControl();
-
-/**
- * @brief 该函数作为外部接口传入MIT参数
- */
-
-
-
-/**
- * @brief 原控制函数，每个电机有独立的 RTOS 任务（DMMotorTask），通过 DMMotorControlInit() 为每个电机创建线程，
- *        任务内直接发送 CAN 报文。
- *        是多任务并发模式。
- */
-/*
 void DMMotorCaliEncoder(DMMotorInstance *motor);
 void DMMotorControlInit();
-*/
 #endif // !DMMOTOR

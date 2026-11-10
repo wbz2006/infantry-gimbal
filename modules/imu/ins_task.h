@@ -27,10 +27,10 @@
 
 typedef struct
 {
-    float Gyro[3];  // 角速度                  在c板上使用时，Gyro[0]对应roll轴，Gyro[1]对应yaw轴，Gyro[2]对应pitch轴
+    float Gyro[3];  // 角速度
     float Accel[3]; // 加速度
     // 还需要增加角速度数据
-    float Roll;                                 
+    float Roll;
     float Pitch;
     float Yaw;
     float YawTotalAngle;

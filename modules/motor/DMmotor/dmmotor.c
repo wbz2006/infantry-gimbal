@@ -75,9 +75,6 @@ DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config)
     motor->other_angle_feedback_ptr = config->controller_param_init_config.other_angle_feedback_ptr;
     motor->other_speed_feedback_ptr = config->controller_param_init_config.other_speed_feedback_ptr;
 
-    motor->speed_feedforward_ptr = config->controller_param_init_config.speed_feedforward_ptr;
-    motor->current_feedforward_ptr = config->controller_param_init_config.current_feedforward_ptr;
-
     config->can_init_config.can_module_callback = DMMotorDecode;
     config->can_init_config.id = motor;
     motor->motor_can_instace = CANRegister(&config->can_init_config);
@@ -118,147 +115,6 @@ void DMMotorOuterLoop(DMMotorInstance *motor, Closeloop_Type_e type)
     motor->motor_settings.outer_loop_type = type;
 }
 
-void DMMotorChangeFeed(DMMotorInstance *motor, Closeloop_Type_e loop, Feedback_Source_e type)
-{
-if (loop == ANGLE_LOOP)
-        motor->motor_settings.angle_feedback_source = type;
-    else if (loop == SPEED_LOOP)
-        motor->motor_settings.speed_feedback_source = type;
-    else
-        LOGERROR("[dm_motor] loop type error, check memory access and func param"); // 检查是否传入了正确的LOOP类型,或发生了指针越界
-}
-
-void DMMotorSetMITRef(DMMotorInstance *motor, float p, float v, float kp, float kd, float tau_ff)
-{
-    motor->mit_config.position_des = p;
-    motor->mit_config.velocity_des = v;
-    motor->mit_config.kp = kp;
-    motor->mit_config.kd = kd;
-    motor->mit_config.torque_des = tau_ff;
-}
-
-/**
- * @brief DM电机统一控制函数，由外部任务周期调用
- *        遍历所有DM电机实例，进行串级PID计算并发送CAN控制报文
- *
- * @note  与DJI电机不同：DM电机每台独占一帧CAN，无法4台合并发送
- *        因此没有sender_group分组概念，每台电机计算完成后立即发送
- * 
- */
-void DMMotorControl()
-{
-    DMMotorInstance *motor;
-    Motor_Control_Setting_s *motor_setting;
-    DM_Motor_Measure_s *measure;
-    float pid_measure, pid_ref;
-
-    // 遍历所有DM电机实例，进行串级PID计算并发送CAN报文
-    for (size_t i = 0; i < idx; ++i)
-    {
-        motor = dm_motor_instance[i];
-        motor_setting = &motor->motor_settings;
-        measure = &motor->measure;
-
-        // 保存设定值，防止计算过程中被修改
-        pid_ref = motor->pid_ref;
-
-        // 电机正反转设置
-        if (motor_setting->motor_reverse_flag == MOTOR_DIRECTION_REVERSE)
-            pid_ref *= -1;
-
-        // ==================== 角度环计算 ====================
-        // 启用角度环 且 外环为角度环 时计算
-        if ((motor_setting->close_loop_type & ANGLE_LOOP) && motor_setting->outer_loop_type == ANGLE_LOOP)
-        {
-            // 选择反馈源：电机自身编码器 / 外部反馈
-            if (motor_setting->angle_feedback_source == OTHER_FEED)
-                pid_measure = *motor->other_angle_feedback_ptr;
-            else
-                pid_measure = measure->position; // DM电机直接用position（已转换为浮点角度）
-
-            pid_ref = PIDCalculate(&motor->angle_PID, pid_measure, pid_ref);
-        }
-
-        // ==================== 速度环计算 ====================
-        // 启用速度环 且 外环为角度或速度环 时计算
-        if ((motor_setting->close_loop_type & SPEED_LOOP) &&
-            (motor_setting->outer_loop_type & (ANGLE_LOOP | SPEED_LOOP)))
-        {
-            // 速度前馈
-            if (motor_setting->feedforward_flag & SPEED_FEEDFORWARD)
-                pid_ref += *motor->speed_feedforward_ptr;
-
-            // 选择反馈源
-            if (motor_setting->speed_feedback_source == OTHER_FEED)
-                pid_measure = *motor->other_speed_feedback_ptr;
-            else
-                pid_measure = measure->velocity;
-
-            pid_ref = PIDCalculate(&motor->speed_PID, pid_measure, pid_ref);
-        }
-
-        // ==================== 电流/力矩环计算 ====================
-        // 电流前馈（只要启用就加，不依赖外环类型）
-        if (motor_setting->feedforward_flag & CURRENT_FEEDFORWARD)
-            pid_ref += *motor->current_feedforward_ptr;
-
-        // 启用电流环则进行PID计算
-        if (motor_setting->close_loop_type & CURRENT_LOOP)
-        {
-            pid_ref = PIDCalculate(&motor->current_PID, measure->torque, pid_ref);
-        }
-
-        // 反馈方向反转
-        if (motor_setting->feedback_reverse_flag == FEEDBACK_DIRECTION_REVERSE)
-            pid_ref *= -1;
-
-        // 限幅
-        float p_des = motor->mit_config.position_des;
-        float v_des = motor->mit_config.velocity_des;
-        float kp = motor->mit_config.kp;
-        float kd = motor->mit_config.kd;
-        float tau_des = pid_ref + motor->mit_config.torque_des;
-
-        LIMIT_MIN_MAX(p_des, DM_P_MIN, DM_P_MAX);
-        LIMIT_MIN_MAX(v_des, DM_V_MIN, DM_V_MAX);
-        LIMIT_MIN_MAX(kp, DM_KP_MIN, DM_KP_MAX);
-        LIMIT_MIN_MAX(kd, DM_KD_MIN, DM_KD_MAX);        
-        LIMIT_MIN_MAX(tau_des, DM_T_MIN, DM_T_MAX);
-
-        // ==================== 填充发送数据 ====================
-        // MIT模式   
-        motor->motor_send_mailbox.position_des = float_to_uint(p_des, DM_P_MIN, DM_P_MAX, 16);
-        motor->motor_send_mailbox.velocity_des = float_to_uint(v_des, DM_V_MIN, DM_V_MAX, 12);
-        motor->motor_send_mailbox.torque_des   = float_to_uint(tau_des, DM_T_MIN, DM_T_MAX, 12);
-        motor->motor_send_mailbox.Kp           = float_to_uint(kp, DM_KP_MIN, DM_KP_MAX, 12);
-        motor->motor_send_mailbox.Kd           = float_to_uint(kd, DM_KD_MIN, DM_KD_MAX, 12);
-
-        // 电机停止则力矩置0
-        if (motor->stop_flag == MOTOR_STOP)
-        {
-            motor->motor_send_mailbox.position_des = float_to_uint(0, DM_P_MIN, DM_P_MAX, 16);
-            motor->motor_send_mailbox.velocity_des = float_to_uint(0, DM_V_MIN, DM_V_MAX, 12);
-            motor->motor_send_mailbox.torque_des   = float_to_uint(0, DM_T_MIN, DM_T_MAX, 12);
-            motor->motor_send_mailbox.Kp           = float_to_uint(0, DM_KP_MIN, DM_KP_MAX, 12);
-            motor->motor_send_mailbox.Kd           = float_to_uint(0, DM_KD_MIN, DM_KD_MAX, 12);
-        }
-        // 按DM电机协议格式填充tx_buff（8字节）
-        motor->motor_can_instace->tx_buff[0] = (uint8_t)(motor->motor_send_mailbox.position_des >> 8);
-        motor->motor_can_instace->tx_buff[1] = (uint8_t)(motor->motor_send_mailbox.position_des);
-        motor->motor_can_instace->tx_buff[2] = (uint8_t)(motor->motor_send_mailbox.velocity_des >> 4);
-        motor->motor_can_instace->tx_buff[3] = (uint8_t)(((motor->motor_send_mailbox.velocity_des & 0xF) << 4) | (motor->motor_send_mailbox.Kp >> 8));
-        motor->motor_can_instace->tx_buff[4] = (uint8_t)(motor->motor_send_mailbox.Kp);
-        motor->motor_can_instace->tx_buff[5] = (uint8_t)(motor->motor_send_mailbox.Kd >> 4);
-        motor->motor_can_instace->tx_buff[6] = (uint8_t)(((motor->motor_send_mailbox.Kd & 0xF) << 4) | (motor->motor_send_mailbox.torque_des >> 8));
-        motor->motor_can_instace->tx_buff[7] = (uint8_t)(motor->motor_send_mailbox.torque_des);
-
-        // DM电机每台单独发送一帧CAN（无法分组）
-        CANTransmit(motor->motor_can_instace, 1);
-    }
-}
-
-
-/*
 
 //@Todo: 目前只实现了力控，更多位控PID等请自行添加
 void DMMotorTask(void const *argument)
@@ -317,5 +173,3 @@ void DMMotorControlInit()
         dm_task_handle[i] = osThreadCreate(osThread(dm_task_name), dm_motor_instance[i]);
     }
 }
-
-*/

@@ -14,6 +14,8 @@
 #include "bsp_log.h"
 #include "robot_def.h"
 
+static USARTInstance *vision_usart_instance;
+
 static Vision_Recv_s recv_data;
 static Vision_Send_s send_data;
 static DaemonInstance *vision_daemon_instance;
@@ -51,7 +53,7 @@ static void VisionOfflineCallback(void *id)
 
 #include "bsp_usart.h"
 
-static USARTInstance *vision_usart_instance;
+
 
 /**
  * @brief 接收解包回调函数,将在bsp_usart.c中被usart rx callback调用

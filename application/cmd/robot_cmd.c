@@ -1,6 +1,5 @@
 // app
 #include "robot_def.h"
-#include "user_lib.h"
 #include "robot_cmd.h"
 // module
 #include "remote_control.h"
@@ -33,10 +32,7 @@ static Chassis_Upload_Data_s chassis_fetch_data; // 从底盘应用接收的反�
 
 static RC_ctrl_t *rc_data;              // 遥控器数据,初始化时返回
 static Vision_Recv_s *vision_recv_data; // 视觉接收数据指针,初始化时返回
-// static Vision_Send_s vision_send_data;  // 视觉发送数据
-
-static Publisher_t *chassis_imu_pub;       // 底盘IMU消息发布者
-static attitude_t chassis_imu_data;         // 暂存底盘IMU数据
+static Vision_Send_s vision_send_data;  // 视觉发送数据
 
 static Publisher_t *gimbal_cmd_pub;            // 云台控制消息发布者
 static Subscriber_t *gimbal_feed_sub;          // 云台反馈信息订阅者
@@ -54,55 +50,13 @@ BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
 void RobotCMDInit()
 {
-    // BMI088_Init_Config_s bmi088_config = {
-    //     .cali_mode = BMI088_CALIBRATE_ONLINE_MODE,
-    //     .work_mode = BMI088_BLOCK_TRIGGER_MODE,
-    //     .spi_acc_config = {
-    //         .spi_handle = &hspi1,
-    //         .GPIOx = GPIOA,
-    //         .cs_pin = GPIO_PIN_4,
-    //         .spi_work_mode = SPI_DMA_MODE,
-    //     },
-    //     .acc_int_config = {
-    //         .GPIOx = GPIOC,
-    //         .GPIO_Pin = GPIO_PIN_4,
-    //         .exti_mode = GPIO_EXTI_MODE_RISING,
-    //     },
-    //     .spi_gyro_config = {
-    //         .spi_handle = &hspi1,
-    //         .GPIOx = GPIOB,
-    //         .cs_pin = GPIO_PIN_0,
-    //         .spi_work_mode = SPI_DMA_MODE,
-    //     },
-    //     .gyro_int_config = {
-    //         .GPIO_Pin = GPIO_PIN_5,
-    //         .GPIOx = GPIOC,
-    //         .exti_mode = GPIO_EXTI_MODE_RISING,
-    //     },
-    //     .heat_pwm_config = {
-    //         .htim = &htim10,
-    //         .channel = TIM_CHANNEL_1,
-    //         .period = 1,
-    //     },
-    //     .heat_pid_config = {
-    //         .Kp = 0.5,
-    //         .Ki = 0,
-    //         .Kd = 0,
-    //         .DeadBand = 0.1,
-    //         .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-    //         .IntegralLimit = 100,
-    //         .MaxOut = 100,
-    //     },
-    // };
-    //bmi088_test = BMI088Register(&bmi088_config);
-    rc_data = RemoteControlInit(&huart3);   // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
-    //vision_recv_data = VisionInit(&huart1); // 视觉通信串口
+    rc_data = RemoteControlInit(&huart5);   // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
+    vision_recv_data = VisionInit(&huart9); // 视觉通信串口
 
     gimbal_cmd_pub = PubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
     gimbal_feed_sub = SubRegister("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
     shoot_cmd_pub = PubRegister("shoot_cmd", sizeof(Shoot_Ctrl_Cmd_s));
     shoot_feed_sub = SubRegister("shoot_feed", sizeof(Shoot_Upload_Data_s));
-    chassis_imu_pub = PubRegister("chassis_imu", sizeof(attitude_t));
 
 #ifdef ONE_BOARD // 双板兼容
     chassis_cmd_pub = PubRegister("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
@@ -153,16 +107,6 @@ static void CalcOffsetAngle()
 }
 
 /**
- * @brief 对云台角度进行软件限位，防止超出机械边界(硬截断)
- *        目前仅对 pitch 做限幅，yaw 可无限旋转
- */
-static void GimbalAngleLimit()
-{
-    gimbal_cmd_send.pitch = float_constrain(gimbal_cmd_send.pitch, PITCH_MIN_ANGLE, PITCH_MAX_ANGLE);
-}
-
-
-/**
  * @brief 控制输入为遥控器(调试时)的模式和控制量设置
  *
  */
@@ -189,13 +133,14 @@ static void RemoteControlSet()
     // 左侧开关状态为[下],或视觉未识别到目标,纯遥控器拨杆控制
     if (switch_is_down(rc_data[TEMP].rc.switch_left) || vision_recv_data->target_state == NO_TARGET)
     { // 按照摇杆的输出大小进行角度增量,增益系数需调整
-        gimbal_cmd_send.yaw += 0.001f * (float)rc_data[TEMP].rc.rocker_l_;
-        gimbal_cmd_send.pitch += 0.0005f * (float)rc_data[TEMP].rc.rocker_l1;
+        gimbal_cmd_send.yaw += 0.005f * (float)rc_data[TEMP].rc.rocker_l_;
+        gimbal_cmd_send.pitch += 0.001f * (float)rc_data[TEMP].rc.rocker_l1;
     }
+    // 云台软件限位
 
     // 底盘参数,目前没有加入小陀螺(调试似乎暂时没有必要),系数需要调整
     chassis_cmd_send.vx = 10.0f * (float)rc_data[TEMP].rc.rocker_r_; // _水平方向
-    chassis_cmd_send.vy = 10.0f * (float)rc_data[TEMP].rc.rocker_r1; // 1水平方向
+    chassis_cmd_send.vy = 10.0f * (float)rc_data[TEMP].rc.rocker_r1; // 1数值方向
 
     // 发射参数
     if (switch_is_up(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[上],弹舱打开
@@ -310,7 +255,7 @@ static void MouseKeySet()
  */
 static void EmergencyHandler()
 {
-    // 拨轮的向下拨超过一半进入急停模式.注意向下打时拨轮是正
+    // 拨轮的向下拨超过一半进入急停模式.注意向打时下拨轮是正
     if (rc_data[TEMP].rc.dial > 300 || robot_state == ROBOT_STOP) // 还需添加重要应用和模块离线的判断
     {
         robot_state = ROBOT_STOP;
@@ -321,8 +266,8 @@ static void EmergencyHandler()
         shoot_cmd_send.load_mode = LOAD_STOP;
         LOGERROR("[CMD] emergency stop!");
     }
-    // 遥控器右侧开关为[上]和[中],恢复正常运行
-    if (switch_is_up(rc_data[TEMP].rc.switch_right) || switch_is_mid(rc_data[TEMP].rc.switch_right))
+    // 遥控器右侧开关为[上],恢复正常运行
+    if (switch_is_up(rc_data[TEMP].rc.switch_right))
     {
         robot_state = ROBOT_READY;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
@@ -341,10 +286,6 @@ void RobotCMDTask()
 #ifdef GIMBAL_BOARD
     chassis_fetch_data = *(Chassis_Upload_Data_s *)CANCommGet(cmd_can_comm);
 #endif // GIMBAL_BOARD
-    
-    chassis_imu_data = chassis_fetch_data.chassis_imu_data;
-    PubPushMessage(chassis_imu_pub, (void *)&chassis_imu_data);
-
     SubGetMessage(shoot_feed_sub, &shoot_fetch_data);
     SubGetMessage(gimbal_feed_sub, &gimbal_fetch_data);
 
@@ -356,8 +297,6 @@ void RobotCMDTask()
     else if (switch_is_up(rc_data[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[上],键盘控制
         MouseKeySet();
 
-    GimbalAngleLimit(); // 对云台角度进行软件限位,防止超出机械边界
-    
     EmergencyHandler(); // 处理模块离线和遥控器急停等紧急情况
 
     // 设置视觉发送数据,还需增加加速度和角速度数据
@@ -373,4 +312,5 @@ void RobotCMDTask()
 #endif // GIMBAL_BOARD
     PubPushMessage(shoot_cmd_pub, (void *)&shoot_cmd_send);
     PubPushMessage(gimbal_cmd_pub, (void *)&gimbal_cmd_send);
+    VisionSend(&vision_send_data);
 }
