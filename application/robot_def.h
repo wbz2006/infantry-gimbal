@@ -15,11 +15,12 @@
 #include "ins_task.h"
 #include "master_process.h"
 #include "stdint.h"
+#include "daemon.h"
 
 /* 开发板类型定义,烧录时注意不要弄错对应功能;修改定义后需要重新编译,只能存在一个定义! */
-#define ONE_BOARD // 单板控制整车
+// #define ONE_BOARD // 单板控制整车
 // #define CHASSIS_BOARD //底盘板
-// #define GIMBAL_BOARD  //云台板
+#define GIMBAL_BOARD  //云台板
 
 //#define VISION_USE_VCP  // 使用虚拟串口发送视觉数据
 #define VISION_USE_UART // 使用串口发送视觉数据
@@ -27,7 +28,6 @@
 /* 机器人重要参数定义,注意根据不同机器人进行修改,浮点数需要以.0或f结尾,无符号以u结尾 */
 // 云台参数
 #define YAW_CHASSIS_ALIGN_ECD 2711  // 云台和底盘对齐指向相同方向时的电机编码器值,若对云台有机械改动需要修改
-#define YAW_ECD_GREATER_THAN_4096 0 // ALIGN_ECD值是否大于4096,是为1,否为0;用于计算云台偏转角度
 #define PITCH_HORIZON_ECD 3412      // 云台处于水平位置时编码器值,若对云台有机械改动需要修改
 #define PITCH_MAX_ANGLE 0           // 云台竖直方向最大角度 (注意反馈如果是陀螺仪，则填写陀螺仪的角度)
 #define PITCH_MIN_ANGLE 0           // 云台竖直方向最小角度 (注意反馈如果是陀螺仪，则填写陀螺仪的角度)
@@ -53,6 +53,8 @@
     (defined(CHASSIS_BOARD) && defined(GIMBAL_BOARD))
 #error Conflict board definition! You can only define one board type.
 #endif
+
+#define APP_COMMAND_TIMEOUT_MS 50U // CMD 命令及应用反馈的新鲜度窗口
 
 #pragma pack(1) // 压缩结构体,取消字节对齐,下面的数据都可能被传输
 /* -------------------------基本控制模式和数据类型定义-------------------------*/
@@ -176,32 +178,32 @@ typedef struct
  * @brief 由cmd订阅,其他应用也可以根据需要获取.
  *
  */
-
 typedef struct
 {
 #if defined(CHASSIS_BOARD) || defined(GIMBAL_BOARD) // 非单板的时候底盘还将imu数据回传(若有必要)
-    // attitude_t chassis_imu_data;
+    attitude_t chassis_imu_data;
 #endif
-    // 后续增加底盘的真实速度
-    // float real_vx;
-    // float real_vy;
-    // float real_wz;
-
     uint8_t rest_heat;           // 剩余枪口热量
     Bullet_Speed_e bullet_speed; // 弹速限制
     Enemy_Color_e enemy_color;   // 0 for blue, 1 for red
-
+    App_Fault_s fault;           // 本应用通信、电机、IMU、控制输入的分类故障状态
+    float real_vx;              // 底盘几何中心前进速度，mm/s
+    float real_vy;              // 底盘几何中心向右速度，mm/s
+    float real_wz;              // 底盘逆时针角速度，degree/s
 } Chassis_Upload_Data_s;
-
 
 typedef struct
 {
     attitude_t gimbal_imu_data;
-    uint16_t yaw_motor_single_round_angle;
+    float yaw_motor_single_round_angle; // 本地反馈，degree
+
+    uint8_t feedback_valid; // 云台反馈是否有效且新鲜
+    App_Fault_s fault;      // 本应用通用故障状态；CMD 汇总后执行停机仲裁
 } Gimbal_Upload_Data_s;
 
 typedef struct
 {
+    App_Fault_s fault; // 本应用通用故障状态；CMD 汇总后执行停机仲裁
     // code to go here
     // ...
 } Shoot_Upload_Data_s;

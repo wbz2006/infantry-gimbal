@@ -93,8 +93,13 @@ static void sbus_to_rc(const uint8_t *sbus_buf)
  */
 static void RemoteControlRxCallback()
 {
-    DaemonReload(rc_daemon_instance);         // 先喂狗
+    // UART 空闲中断也可能交付半帧；只有完整 DBUS 帧及有效开关值才能维持在线。
+    if (rc_usart_instance->recv_len != REMOTE_CONTROL_FRAME_SIZE ||
+        ((rc_usart_instance->recv_buff[5] >> 4) & 0x03) == 0 ||
+        ((rc_usart_instance->recv_buff[5] >> 6) & 0x03) == 0)
+        return;
     sbus_to_rc(rc_usart_instance->recv_buff); // 进行协议解析
+    DaemonReload(rc_daemon_instance);
 }
 
 /**
@@ -119,6 +124,7 @@ RC_ctrl_t *RemoteControlInit(UART_HandleTypeDef *rc_usart_handle)
     // 进行守护进程的注册,用于定时检查遥控器是否正常工作
     Daemon_Init_Config_s daemon_conf = {
         .reload_count = 10, // 100ms未收到数据视为离线,遥控器的接收频率实际上是1000/14Hz(大约70Hz)
+        .require_first_reload = 1,
         .callback = RCLostCallback,
         .owner_id = NULL, // 只有1个遥控器,不需要owner_id
     };

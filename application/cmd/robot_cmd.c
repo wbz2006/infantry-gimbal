@@ -12,6 +12,7 @@
 // bsp
 #include "bsp_dwt.h"
 #include "bsp_log.h"
+#include "user_lib.h"
 
 // 私有宏,自动将编码器转换成角度值
 #define YAW_ALIGN_ANGLE (YAW_CHASSIS_ALIGN_ECD * ECD_ANGLE_COEF_DJI) // 对齐时的角度,0-360
@@ -45,6 +46,9 @@ static Shoot_Ctrl_Cmd_s shoot_cmd_send;      // 传递给发射的控制信息
 static Shoot_Upload_Data_s shoot_fetch_data; // 从发射获取的反馈信息
 
 static Robot_Status_e robot_state; // 机器人整体工作状态
+static App_Fault_s cmd_fault;
+static DaemonInstance *cmd_daemon;
+static DaemonInstance *chassis_feed_daemon, *gimbal_feed_daemon, *shoot_feed_daemon;
 
 BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
@@ -57,10 +61,18 @@ void RobotCMDInit()
     gimbal_feed_sub = SubRegister("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
     shoot_cmd_pub = PubRegister("shoot_cmd", sizeof(Shoot_Ctrl_Cmd_s));
     shoot_feed_sub = SubRegister("shoot_feed", sizeof(Shoot_Upload_Data_s));
+    Daemon_Init_Config_s feedback_daemon_config = {
+        .reload_count = DAEMON_COUNT_FROM_MS(APP_COMMAND_TIMEOUT_MS),
+        .require_first_reload = 1,
+    };
+    cmd_daemon = DaemonRegister(&feedback_daemon_config);
+    gimbal_feed_daemon = DaemonRegister(&feedback_daemon_config);
+    shoot_feed_daemon = DaemonRegister(&feedback_daemon_config);
 
 #ifdef ONE_BOARD // 双板兼容
     chassis_cmd_pub = PubRegister("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
     chassis_feed_sub = SubRegister("chassis_feed", sizeof(Chassis_Upload_Data_s));
+    chassis_feed_daemon = DaemonRegister(&feedback_daemon_config);
 #endif // ONE_BOARD
 #ifdef GIMBAL_BOARD
     CANComm_Init_Config_s comm_conf = {
@@ -71,39 +83,25 @@ void RobotCMDInit()
         },
         .recv_data_len = sizeof(Chassis_Upload_Data_s),
         .send_data_len = sizeof(Chassis_Ctrl_Cmd_s),
+        .daemon_count = DAEMON_COUNT_FROM_MS(APP_COMMAND_TIMEOUT_MS),
     };
     cmd_can_comm = CANCommInit(&comm_conf);
+    // CANComm 已按完整有效反馈包维护在线计时，CMD 不再另设底盘反馈计时器。
+    chassis_feed_daemon = cmd_can_comm->comm_daemon;
 #endif // GIMBAL_BOARD
     gimbal_cmd_send.pitch = 0;
 
-    robot_state = ROBOT_READY; // 启动时机器人进入工作模式,后续加入所有应用初始化完成之后再进入
+    robot_state = ROBOT_STOP; // 首次收到完整反馈且无故障后，通过右开关上拨解锁
 }
 
 /**
- * @brief 根据gimbal app传回的当前电机角度计算和零位的误差
- *        单圈绝对角度的范围是0~360,说明文档中有图示
- *
+ * @brief 将 Yaw 编码器相对底盘正前方的偏角归一化到 [-180, 180] 度。
+ * @note 零位两侧及编码器跨 0 度时均取最短转角，不依赖零位是否大于 180 度。
  */
 static void CalcOffsetAngle()
 {
-    // 别名angle提高可读性,不然太长了不好看,虽然基本不会动这个函数
-    static float angle;
-    angle = gimbal_fetch_data.yaw_motor_single_round_angle; // 从云台获取的当前yaw电机单圈角度
-#if YAW_ECD_GREATER_THAN_4096                               // 如果大于180度
-    if (angle > YAW_ALIGN_ANGLE && angle <= 180.0f + YAW_ALIGN_ANGLE)
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-    else if (angle > 180.0f + YAW_ALIGN_ANGLE)
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE - 360.0f;
-    else
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-#else // 小于180度
-    if (angle > YAW_ALIGN_ANGLE)
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-    else if (angle <= YAW_ALIGN_ANGLE && angle >= YAW_ALIGN_ANGLE - 180.0f)
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-    else
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE + 360.0f;
-#endif
+    chassis_cmd_send.offset_angle = theta_format(
+        gimbal_fetch_data.yaw_motor_single_round_angle - YAW_ALIGN_ANGLE);
 }
 
 /**
@@ -113,7 +111,7 @@ static void CalcOffsetAngle()
 static void RemoteControlSet()
 {
     // 控制底盘和云台运行模式,云台待添加,云台是否始终使用IMU数据?
-    if (switch_is_down(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[下],底盘跟随云台
+    if (switch_is_down(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[下],底盘小陀螺
     {
         chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
         gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
@@ -121,7 +119,7 @@ static void RemoteControlSet()
     else if (switch_is_mid(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[中],底盘和云台分离,底盘保持不转动
     {
         chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
-        gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
     }
 
     // 云台参数,确定云台控制数据
@@ -169,7 +167,7 @@ static void RemoteControlSet()
 static void MouseKeySet()
 {
     chassis_cmd_send.vx = rc_data[TEMP].key[KEY_PRESS].w * 300 - rc_data[TEMP].key[KEY_PRESS].s * 300; // 系数待测
-    chassis_cmd_send.vy = rc_data[TEMP].key[KEY_PRESS].s * 300 - rc_data[TEMP].key[KEY_PRESS].d * 300;
+    chassis_cmd_send.vy = rc_data[TEMP].key[KEY_PRESS].d * 300 - rc_data[TEMP].key[KEY_PRESS].a * 300;
 
     gimbal_cmd_send.yaw += (float)rc_data[TEMP].mouse.x / 660 * 10; // 系数待测
     gimbal_cmd_send.pitch += (float)rc_data[TEMP].mouse.y / 660 * 10;
@@ -247,32 +245,46 @@ static void MouseKeySet()
 }
 
 /**
- * @brief  紧急停止,包括遥控器左上侧拨轮打满/重要模块离线/双板通信失效等
- *         停止的阈值'300'待修改成合适的值,或改为开关控制.
- *
- * @todo   后续修改为遥控器离线则电机停止(关闭遥控器急停),通过给遥控器模块添加daemon实现
- *
+ * @brief 汇总 CMD 与三个执行应用的故障，锁存急停，并在故障解除后允许手动恢复。
+ * @note 反馈超时不使用缓存继续控制；右开关上拨不能覆盖当前仍存在的故障或拨轮急停。
  */
 static void EmergencyHandler()
 {
-    // 拨轮的向下拨超过一半进入急停模式.注意向打时下拨轮是正
-    if (rc_data[TEMP].rc.dial > 300 || robot_state == ROBOT_STOP) // 还需添加重要应用和模块离线的判断
-    {
+    uint32_t faults = AppFaultUpdate(cmd_daemon, &cmd_fault) |
+        AppFaultUpdate(gimbal_feed_daemon, &gimbal_fetch_data.fault) |
+        AppFaultUpdate(shoot_feed_daemon, &shoot_fetch_data.fault);
+    faults |= (uint32_t)chassis_fetch_data.fault.motor_offline_flags |
+        chassis_fetch_data.fault.comm_fault_flags | chassis_fetch_data.fault.imu_fault_flags |
+        chassis_fetch_data.fault.control_fault_flags;
+
+    if (faults != 0 || rc_data[TEMP].rc.dial > 300)
         robot_state = ROBOT_STOP;
-        gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
-        chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
-        shoot_cmd_send.shoot_mode = SHOOT_OFF;
-        shoot_cmd_send.friction_mode = FRICTION_OFF;
-        shoot_cmd_send.load_mode = LOAD_STOP;
-        LOGERROR("[CMD] emergency stop!");
-    }
-    // 遥控器右侧开关为[上],恢复正常运行
-    if (switch_is_up(rc_data[TEMP].rc.switch_right))
+    else if (switch_is_up(rc_data[TEMP].rc.switch_right))
     {
         robot_state = ROBOT_READY;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
-        LOGINFO("[CMD] reinstate, robot ready");
     }
+
+    if (robot_state == ROBOT_STOP)
+    {
+        gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+        chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
+        chassis_cmd_send.vx = 0.0f;
+        chassis_cmd_send.vy = 0.0f;
+        chassis_cmd_send.wz = 0.0f;
+        // 零力矩期间跟随当前姿态，防止恢复时追赶停机期间积累的目标角。
+        gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+        gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;
+        shoot_cmd_send.shoot_mode = SHOOT_OFF;
+        shoot_cmd_send.friction_mode = FRICTION_OFF;
+        shoot_cmd_send.load_mode = LOAD_STOP;
+        shoot_cmd_send.shoot_rate = 0.0f;
+    }
+}
+
+const App_Fault_s *RobotCMDGetFault(void)
+{
+    return &cmd_fault;
 }
 
 /* 机器人核心控制任务,200Hz频率运行(必须高于视觉发送频率) */
@@ -281,13 +293,21 @@ void RobotCMDTask()
    // BMI088Acquire(bmi088_test,&bmi088_data) ;
     // 从其他应用获取回传数据
 #ifdef ONE_BOARD
-    SubGetMessage(chassis_feed_sub, (void *)&chassis_fetch_data);
+    if (SubGetMessage(chassis_feed_sub, &chassis_fetch_data))
+        DaemonReload(chassis_feed_daemon);
+    uint8_t chassis_online = DaemonIsOnline(chassis_feed_daemon);
 #endif // ONE_BOARD
 #ifdef GIMBAL_BOARD
-    chassis_fetch_data = *(Chassis_Upload_Data_s *)CANCommGet(cmd_can_comm);
+    uint8_t chassis_online = CANCommReceive(cmd_can_comm, &chassis_fetch_data);
 #endif // GIMBAL_BOARD
-    SubGetMessage(shoot_feed_sub, &shoot_fetch_data);
-    SubGetMessage(gimbal_feed_sub, &gimbal_fetch_data);
+    if (SubGetMessage(shoot_feed_sub, &shoot_fetch_data))
+        DaemonReload(shoot_feed_daemon);
+    if (SubGetMessage(gimbal_feed_sub, &gimbal_fetch_data))
+        DaemonReload(gimbal_feed_daemon);
+    cmd_fault.comm_fault_flags = chassis_online && DaemonIsOnline(shoot_feed_daemon) &&
+        DaemonIsOnline(gimbal_feed_daemon) ? APP_COMM_FAULT_NONE : APP_COMM_FAULT_FEEDBACK_OFFLINE;
+    cmd_fault.control_fault_flags = RemoteControlIsOnline() ?
+        APP_CONTROL_FAULT_NONE : APP_CONTROL_FAULT_REMOTE_OFFLINE;
 
     // 根据gimbal的反馈值计算云台和底盘正方向的夹角,不需要传参,通过static私有变量完成
     CalcOffsetAngle();
@@ -312,5 +332,6 @@ void RobotCMDTask()
 #endif // GIMBAL_BOARD
     PubPushMessage(shoot_cmd_pub, (void *)&shoot_cmd_send);
     PubPushMessage(gimbal_cmd_pub, (void *)&gimbal_cmd_send);
+    DaemonReload(cmd_daemon);
     VisionSend(&vision_send_data);
 }

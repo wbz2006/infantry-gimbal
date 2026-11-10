@@ -1,23 +1,27 @@
 #include "gimbal.h"
 #include "robot_def.h"
 #include "dji_motor.h"
+#include "dmmotor.h"
 #include "ins_task.h"
 #include "message_center.h"
 #include "general_def.h"
 #include "bmi088.h"
+#include <math.h>
 
 static attitude_t *gimba_IMU_data; // 云台IMU数据
-static DJIMotorInstance *yaw_motor, *pitch_motor;
+static DJIMotorInstance *yaw_motor;
+static DMMotorInstance  *pitch_motor;
 
 static Publisher_t *gimbal_pub;                   // 云台应用消息发布者(云台反馈给cmd)
 static Subscriber_t *gimbal_sub;                  // cmd控制消息订阅者
 static Gimbal_Upload_Data_s gimbal_feedback_data; // 回传给cmd的云台状态信息
 static Gimbal_Ctrl_Cmd_s gimbal_cmd_recv;         // 来自cmd的控制信息
+static DaemonInstance *gimbal_cmd_daemon;
 
 static BMI088Instance *bmi088; // 云台IMU
 void GimbalInit()
 {   
-    gimba_IMU_data = INS_Init(); // IMU先初始化,获取姿态数据指针赋给yaw电机的其他数据来源
+    gimba_IMU_data = INS_GetData(); // 硬件初始化由 INS 任务在中断开启后执行
     // YAW
     Motor_Init_Config_s yaw_config = {
         .can_init_config = {
@@ -58,8 +62,9 @@ void GimbalInit()
     // PITCH
     Motor_Init_Config_s pitch_config = {
         .can_init_config = {
-            .can_handle = &hcan3,
-            .tx_id = 2,
+            .can_handle = &hcan1,
+            .tx_id = 0x1,
+            .rx_id = 0x302
         },
         .controller_param_init_config = {
             .angle_PID = {
@@ -89,22 +94,50 @@ void GimbalInit()
             .close_loop_type = SPEED_LOOP | ANGLE_LOOP,
             .motor_reverse_flag = MOTOR_DIRECTION_NORMAL,
         },
-        .motor_type = GM6020,
+        .motor_type = DM4310,
     };
     // 电机对total_angle闭环,上电时为零,会保持静止,收到遥控器数据再动
     yaw_motor = DJIMotorInit(&yaw_config);
-    pitch_motor = DJIMotorInit(&pitch_config);
+    pitch_motor = DMMotorInit(&pitch_config);
 
     gimbal_pub = PubRegister("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
     gimbal_sub = SubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
+    Daemon_Init_Config_s cmd_daemon_config = {
+        .reload_count = DAEMON_COUNT_FROM_MS(APP_COMMAND_TIMEOUT_MS),
+        .require_first_reload = 1,
+    };
+    gimbal_cmd_daemon = DaemonRegister(&cmd_daemon_config);
+    DJIMotorStop(yaw_motor);
+    DMMotorStop(pitch_motor);
 }
 
 /* 机器人云台控制核心任务,后续考虑只保留IMU控制,不再需要电机的反馈 */
 void GimbalTask()
 {
-    // 获取云台控制数据
-    // 后续增加未收到数据的处理
-    SubGetMessage(gimbal_sub, &gimbal_cmd_recv);
+    uint8_t message_received = SubGetMessage(gimbal_sub, &gimbal_cmd_recv);
+    uint8_t command_valid = isfinite(gimbal_cmd_recv.yaw) && isfinite(gimbal_cmd_recv.pitch) &&
+        isfinite(gimbal_cmd_recv.chassis_rotate_wz) &&
+        (gimbal_cmd_recv.gimbal_mode == GIMBAL_ZERO_FORCE ||
+         gimbal_cmd_recv.gimbal_mode == GIMBAL_GYRO_MODE);
+    // 只有新收到且内容有效的命令才能延长命令的有效期。
+    if (message_received && command_valid)
+        DaemonReload(gimbal_cmd_daemon);
+
+    gimbal_feedback_data.fault.comm_fault_flags = DaemonIsOnline(gimbal_cmd_daemon) ?
+        APP_COMM_FAULT_NONE : APP_COMM_FAULT_COMMAND_OFFLINE;
+    if (!command_valid)
+        gimbal_feedback_data.fault.comm_fault_flags |= APP_COMM_FAULT_INVALID_COMMAND;
+    // 云台电机位 1 为 DJI Yaw，位 2 为 DM Pitch；其余位保持 0。
+    gimbal_feedback_data.fault.motor_offline_flags = MOTOR_OFFLINE_NONE;
+    if (MotorIsOffline(yaw_motor->daemon, yaw_motor->motor_can_instance))
+        gimbal_feedback_data.fault.motor_offline_flags |= MOTOR_1_OFFLINE;
+    if (MotorIsOffline(pitch_motor->motor_daemon, pitch_motor->motor_can_instace))
+        gimbal_feedback_data.fault.motor_offline_flags |= MOTOR_2_OFFLINE;
+    gimbal_feedback_data.fault.imu_fault_flags = INS_GetFaultFlags();
+
+    if (AppFaultUpdate(gimbal_cmd_daemon, &gimbal_feedback_data.fault) != 0)
+        gimbal_cmd_recv.gimbal_mode = GIMBAL_ZERO_FORCE;
+    gimbal_feedback_data.feedback_valid = DaemonIsFeedbackValid(gimbal_cmd_daemon);
 
     // @todo:现在已不再需要电机反馈,实际上可以始终使用IMU的姿态数据来作为云台的反馈,yaw电机的offset只是用来跟随底盘
     // 根据控制模式进行电机反馈切换和过渡,视觉模式在robot_cmd模块就已经设置好,gimbal只看yaw_ref和pitch_ref
@@ -112,30 +145,22 @@ void GimbalTask()
     {
     // 停止
     case GIMBAL_ZERO_FORCE:
+        // 停机时丢弃闭环历史，恢复后不继续使用故障前的积分量。
+        if (yaw_motor->stop_flag == MOTOR_ENALBED) DJIMotorResetPIDState(yaw_motor);
+        if (pitch_motor->stop_flag == MOTOR_ENALBED) DMMotorResetPIDState(pitch_motor);
         DJIMotorStop(yaw_motor);
-        DJIMotorStop(pitch_motor);
+        DMMotorStop(pitch_motor);
         break;
     // 使用陀螺仪的反馈,底盘根据yaw电机的offset跟随云台或视觉模式采用
     case GIMBAL_GYRO_MODE: // 后续只保留此模式
         DJIMotorEnable(yaw_motor);
-        DJIMotorEnable(pitch_motor);
+        DMMotorEnable(pitch_motor);
         DJIMotorChangeFeed(yaw_motor, ANGLE_LOOP, OTHER_FEED);
         DJIMotorChangeFeed(yaw_motor, SPEED_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(pitch_motor, ANGLE_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(pitch_motor, SPEED_LOOP, OTHER_FEED);
+        DMMotorChangeFeed(pitch_motor, ANGLE_LOOP, OTHER_FEED);
+        DMMotorChangeFeed(pitch_motor, SPEED_LOOP, OTHER_FEED);
         DJIMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw); // yaw和pitch会在robot_cmd中处理好多圈和单圈
-        DJIMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
-        break;
-    // 云台自由模式,使用编码器反馈,底盘和云台分离,仅云台旋转,一般用于调整云台姿态(英雄吊射等)/能量机关
-    case GIMBAL_FREE_MODE: // 后续删除,或加入云台追地盘的跟随模式(响应速度更快)
-        DJIMotorEnable(yaw_motor);
-        DJIMotorEnable(pitch_motor);
-        DJIMotorChangeFeed(yaw_motor, ANGLE_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(yaw_motor, SPEED_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(pitch_motor, ANGLE_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(pitch_motor, SPEED_LOOP, OTHER_FEED);
-        DJIMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw); // yaw和pitch会在robot_cmd中处理好多圈和单圈
-        DJIMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
+        DMMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
         break;
     default:
         break;
