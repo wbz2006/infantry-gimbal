@@ -21,13 +21,17 @@ osThreadId insTaskHandle;
 osThreadId robotTaskHandle;
 osThreadId motorTaskHandle;
 osThreadId daemonTaskHandle;
+#if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
 osThreadId uiTaskHandle;
+#endif
 
 void StartINSTASK(void const *argument);
 void StartMOTORTASK(void const *argument);
 void StartDAEMONTASK(void const *argument);
 void StartROBOTTASK(void const *argument);
+#if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
 void StartUITASK(void const *argument);
+#endif
 
 /**
  * @brief 初始化机器人任务,所有持续运行的任务都在这里初始化
@@ -48,8 +52,11 @@ void OSTaskInit()
     osThreadDef(robottask, StartROBOTTASK, osPriorityNormal, 0, 1024);
     robotTaskHandle = osThreadCreate(osThread(robottask), NULL);
 
+    // 裁判系统由底盘初始化；云台板不创建依赖裁判系统实例的 UI 任务。
+#if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
     osThreadDef(uitask, StartUITASK, osPriorityNormal, 0, 512);
     uiTaskHandle = osThreadCreate(osThread(uitask), NULL);
+#endif
 
     HTMotorControlInit(); // 没有注册HT电机则不会执行
 }
@@ -128,6 +135,7 @@ __attribute__((noreturn)) void StartROBOTTASK(void const *argument)
     }
 }
 
+#if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
 __attribute__((noreturn)) void StartUITASK(void const *argument)
 {
     LOGINFO("[freeRTOS] UI Task Start");
@@ -140,3 +148,4 @@ __attribute__((noreturn)) void StartUITASK(void const *argument)
         osDelay(1); // 即使没有任何UI需要刷新,也挂起一次,防止卡在UITask中无法切换
     }
 }
+#endif
