@@ -25,18 +25,17 @@ void GimbalInit()
     // YAW
     Motor_Init_Config_s yaw_config = {
         .can_init_config = {
-            .can_handle = &hcan3,
-            .tx_id = 1,
+            .can_handle = &hcan1,
+            .tx_id = 4,
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 8, // 8
+                .Kp = 65, // 8
                 .Ki = 0,
-                .Kd = 0,
+                .Kd = 1,
                 .DeadBand = 0.1,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 100,
-
                 .MaxOut = 500,
             },
             .speed_PID = {
@@ -68,20 +67,20 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 10, // 10
+                .Kp = 0.5, // 10
                 .Ki = 0,
                 .Kd = 0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 100,
-                .MaxOut = 500,
+                .MaxOut = 10,
             },
             .speed_PID = {
-                .Kp = 50,  // 50
-                .Ki = 350, // 350
+                .Kp = 0.3,  // 50
+                .Ki = 0, // 350
                 .Kd = 0,   // 0
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-                .IntegralLimit = 2500,
-                .MaxOut = 20000,
+                .IntegralLimit = 0,
+                .MaxOut = 1.5,
             },
             .other_angle_feedback_ptr = &gimba_IMU_data->Pitch,
             // 还需要增加角速度额外反馈指针,注意方向,ins_task.md中有c板的bodyframe坐标系说明
@@ -93,6 +92,7 @@ void GimbalInit()
             .outer_loop_type = ANGLE_LOOP,
             .close_loop_type = SPEED_LOOP | ANGLE_LOOP,
             .motor_reverse_flag = MOTOR_DIRECTION_NORMAL,
+            .feedback_reverse_flag = FEEDBACK_DIRECTION_REVERSE,
         },
         .motor_type = DM4310,
     };
