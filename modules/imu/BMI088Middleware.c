@@ -37,8 +37,8 @@ uint8_t BMI088_read_write_byte(uint8_t txdata)
     uint8_t rx_data = 0;
     if (spi_failed)
         return 0;
-    // 初始化在 INS 任务中运行，HAL tick 已启用；首次失败后跳过本次操作的其余字节。
-    if (HAL_SPI_TransmitReceive(BMI088_SPI, &txdata, &rx_data, 1, 1) != HAL_OK)
+    // 预留 tick 边界和任务切换时间；1 ms 可能使已完成的字节传输仍被 HAL 判为超时。
+    if (HAL_SPI_TransmitReceive(BMI088_SPI, &txdata, &rx_data, 1, 10) != HAL_OK)
     {
         spi_failed = 1;
         return 0;
